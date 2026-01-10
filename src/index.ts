@@ -1,7 +1,6 @@
 import path from "node:path";
-import { stdin as input, stdout as output } from "node:process";
-import readline from "node:readline/promises";
 
+import { Separator, select } from "@inquirer/prompts";
 import { loadConfig, resolveTargetPath } from "./config";
 import { findNearestPackageJson } from "./package-info";
 import {
@@ -105,47 +104,33 @@ async function runComponentExplorer(
         return;
     }
 
-    candidates
-        .slice()
-        .sort((a, b) => a.localeCompare(b))
-        .forEach((candidate, index) =>
-            console.log(`  [${index + 1}] ${candidate}`)
-        );
-    console.log("  [q] Quit");
+    const sortedCandidates = candidates.slice().sort((a, b) => a.localeCompare(b));
 
-    const rl = readline.createInterface({ input, output });
-
-    try {
-        while (true) {
-            const answer = (
-                await rl.question(
-                    "Select a component to inspect (number or q to exit): "
-                )
-            )
-                .trim()
-                .toLowerCase();
-
-            if (answer === "" || answer === "q") {
-                console.log("Exiting component candidates explorer.");
-                break;
+    while (true) {
+        const answer = await select<string | null>({
+            message: "Select a component to inspect (choose Exit to finish):",
+            choices: [
+                ...sortedCandidates.map((candidate) => ({
+                    name: candidate,
+                    value: candidate,
+                })),
+                new Separator(),
+                { name: "Exit", value: null },
+            ],
+            pageSize: Math.min(sortedCandidates.length + 1, 20),
+        }).catch((error) => {
+            if (error instanceof Error && error.name === "ExitPromptError") {
+                return null;
             }
+            throw error;
+        });
 
-            const index = Number.parseInt(answer, 10);
-            if (!Number.isFinite(index) || index < 1 || index > candidates.length) {
-                console.log("Invalid selection. Please choose a listed number or q.");
-                continue;
-            }
-
-            const candidatePath = candidates[index - 1];
-            printComponentReport(
-                candidatePath,
-                fileIndex,
-                rootPath,
-                options
-            );
+        if (!answer) {
+            console.log("Exiting component candidates explorer.");
+            break;
         }
-    } finally {
-        rl.close();
+
+        printComponentReport(answer, fileIndex, rootPath, options);
     }
 }
 
