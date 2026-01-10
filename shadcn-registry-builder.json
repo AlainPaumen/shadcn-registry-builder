@@ -1,0 +1,21 @@
+{
+    "allowed_extensions": [
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx"
+    ],
+    "skip_directories": [
+        "node_modules",
+        ".git",
+        "dist",
+        ".dist"
+    ],
+    "knownRegistries": [
+        {
+            "src/components/ui/": "@shadcn/ui",
+            "src/@registry/form/": "@hoogin/form",
+            "src/@registry/intlayer/": "@hoogin/intlayer"
+        }
+    ]
+}
