@@ -9,7 +9,9 @@
         "node_modules",
         ".git",
         "dist",
-        ".dist"
+        ".dist",
+        "example",
+        "examples"
     ],
     "knownRegistries": [
         {

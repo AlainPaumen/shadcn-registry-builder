@@ -3,9 +3,14 @@ import path from "node:path";
 import ts from "typescript";
 
 import type { NormalizedConfig } from "./config";
+import {
+    isContentFilePath,
+    recordContentFile
+} from "./scanner/content-files";
 import { extractImports } from "./scanner/import-parser";
 import type { ScanOptions } from "./scanner/types";
 import type { DirectoryNode, FileNode, TreeNode } from "./types";
+export { attachContentDependencies } from "./scanner/content-files";
 export {
     annotateImportCounts,
     buildFileIndex,
@@ -36,6 +41,10 @@ export async function scanDirectory(
                 }
 
                 if (entry.isFile()) {
+                    if (isContentFilePath(entryPath)) {
+                        recordContentFile(entryPath, rootPath, options);
+                        return null;
+                    }
                     return inspectFile(entryPath, rootPath, config, options);
                 }
 

@@ -5,6 +5,7 @@ import { loadConfig, resolveTargetPath } from "./config";
 import { findNearestPackageJson } from "./package-info";
 import {
     annotateImportCounts,
+    attachContentDependencies,
     buildFileIndex,
     findFileNodeByRelativePath,
     getComponentCandidates,
@@ -32,9 +33,11 @@ async function main() {
 
     const result = await scanDirectory(target, target, config, scanOptions);
     annotateImportCounts(result, target, scanOptions);
+    attachContentDependencies(result, scanOptions);
     const fileIndex = buildFileIndex(result);
     const componentCandidates = getComponentCandidates(result);
 
+    console.log("\nFiles Index:");
     console.log(JSON.stringify(result, null, 2));
     await runComponentExplorer(
         componentCandidates,
@@ -42,6 +45,18 @@ async function main() {
         target,
         scanOptions
     );
+}
+
+function formatFileDependencyPath(absolutePath: string, rootPath: string): string {
+    const normalized = absolutePath.replace(/\\/g, "/");
+    const marker = "/src/";
+    const markerIndex = normalized.indexOf(marker);
+    if (markerIndex !== -1) {
+        return `.${normalized.slice(markerIndex)}`;
+    }
+
+    const relative = path.relative(rootPath, absolutePath).replace(/\\/g, "/");
+    return relative || ".";
 }
 
 function logPackageInfo(packageInfo: Awaited<ReturnType<typeof findNearestPackageJson>>) {
@@ -54,8 +69,8 @@ function logPackageInfo(packageInfo: Awaited<ReturnType<typeof findNearestPackag
     const deps = Object.keys(packageInfo.dependencies).sort();
     const devDeps = Object.keys(packageInfo.devDependencies).sort();
 
-    console.log("Dependencies:", deps.length ? deps.join(", ") : "(none)");
-    console.log("DevDependencies:", devDeps.length ? devDeps.join(", ") : "(none)");
+    console.log("\nDependencies:", deps.length ? deps.join(", ") : "(none)");
+    console.log("\nDevDependencies:", devDeps.length ? devDeps.join(", ") : "(none)");
 }
 
 function logTsconfigInfo(
@@ -63,17 +78,17 @@ function logTsconfigInfo(
     packageRoot: string
 ) {
     if (tsconfigInfo.files.length === 0) {
-        console.log("No tsconfig files found above target directory.");
+        console.log("\nNo tsconfig files found above target directory.");
         return;
     }
 
-    console.log("Using tsconfig files:");
+    console.log("\nUsing tsconfig files:");
     tsconfigInfo.files.forEach((file) =>
         console.log(` - ${path.relative(packageRoot, file)}`)
     );
 
     if (tsconfigInfo.pathMappings.length) {
-        console.log("Resolved path aliases:");
+        console.log("\nResolved path aliases:");
         tsconfigInfo.pathMappings.forEach((mapping) => {
             const targets = mapping.targets
                 .map((target) => path.relative(packageRoot, target))
@@ -81,7 +96,7 @@ function logTsconfigInfo(
             console.log(` - ${mapping.alias} -> ${targets}`);
         });
     } else {
-        console.log("No path aliases defined in located tsconfig files.");
+        console.log("\nNo path aliases defined in located tsconfig files.");
     }
 }
 
@@ -147,92 +162,100 @@ function printComponentReport(
     }
 
     console.log(`\nComponent Candidates Report: ${node.path}`);
-    printDependencyTree(
-        node,
-        fileIndex,
-        rootPath,
-        options,
-        new Set<string>(),
-        ""
-    );
+    const summary = buildComponentSummary(node, fileIndex, rootPath, options);
+    const dependencies = printSummaryGroup("dependencies", summary.dependencies);
+    const registryDependencies = printSummaryGroup("registryDependencies", summary.registryDependencies);
+    const fileDependencies = printSummaryGroupFiles(summary.fileDependencies);
+    const allResults = { ...dependencies, ...registryDependencies, ...fileDependencies };
+    console.log(JSON.stringify(allResults, null, 2));
 }
 
-function printDependencyTree(
+type ComponentSummary = {
+    dependencies: Set<string>;
+    registryDependencies: Set<string>;
+    fileDependencies: Set<string>;
+};
+
+function buildComponentSummary(
     node: FileNode,
     fileIndex: Map<string, FileNode>,
     rootPath: string,
     options: ScanOptions,
-    visited: Set<string>,
-    indent: string
-) {
-    console.log(`${indent}${node.path}`);
+    summary: ComponentSummary = {
+        dependencies: new Set(),
+        registryDependencies: new Set(),
+        fileDependencies: new Set(),
+    },
+    visited: Set<string> = new Set()
+): ComponentSummary {
     if (visited.has(node.path)) {
-        console.log(`${indent}  (already visited)`);
-        return;
+        return summary;
     }
+
     visited.add(node.path);
 
-    const sectionIndent = `${indent}  `;
-    printPackageSection(
-        "Dependencies",
-        collectPackageReferences(node, "dependency"),
-        sectionIndent
+    collectPackageReferences(node, "dependency").forEach((value) =>
+        summary.dependencies.add(value)
     );
-    printPackageSection(
-        "DevDependencies",
-        collectPackageReferences(node, "devDependency"),
-        sectionIndent
+    collectPackageReferences(node, "devDependency").forEach((value) =>
+        summary.dependencies.add(value)
     );
-    printPackageSection(
-        "RegistryDependencies",
-        collectPackageReferences(node, "registryDependency"),
-        sectionIndent
+    collectPackageReferences(node, "registryDependency").forEach((value) =>
+        summary.registryDependencies.add(value)
     );
 
-    const fileDependencies = collectFileDependencies(
-        node,
-        fileIndex,
-        rootPath,
-        options
-    );
+    const fileDependencies = collectFileDependencies(node, fileIndex, rootPath, options);
+    fileDependencies.forEach((child) => {
+        const absolutePath = path.resolve(rootPath, child.path);
+        const displayPath = formatFileDependencyPath(absolutePath, rootPath);
+        summary.fileDependencies.add(displayPath);
+        buildComponentSummary(child, fileIndex, rootPath, options, summary, visited);
+    });
 
-    if (fileDependencies.length) {
-        console.log(`${sectionIndent}FileDependencies:`);
-        fileDependencies.forEach((child) => {
-            if (visited.has(child.path)) {
-                console.log(`${sectionIndent}  - ${child.path} (already visited)`);
+    return summary;
+}
+
+function printSummaryGroup(title: string, values: Set<string>) {
+    const items = Array.from(values).sort((a, b) => a.localeCompare(b));
+
+    if (!items.length) {
+        return {};
+    }
+    return { [title]: items };
+}
+
+function printSummaryGroupFiles(values: Set<string>) {
+    const items = Array.from(values).sort((a, b) => a.localeCompare(b));
+
+    if (!items.length) {
+        return {};
+    }
+    let files = items.map((item) => {
+        const target = item.startsWith(".") ? item.replace(".", "~") : item;
+        const extension = path.extname(target);
+        let type = "registry:file";
+        if (extension === ".tsx" || extension === ".jsx") {
+            if (item.endsWith(".content.ts") || item.endsWith(".content.js")) {
+                type = "registry:file";
             } else {
-                printDependencyTree(
-                    child,
-                    fileIndex,
-                    rootPath,
-                    options,
-                    visited,
-                    `${sectionIndent}  `
-                );
+                type = "registry:component";
             }
-        });
-    } else {
-        console.log(`${sectionIndent}FileDependencies: (none)`);
-    }
-
-    visited.delete(node.path);
+        }
+        if (extension === ".ts" || extension === ".js") {
+            if (item.endsWith(".content.ts") || item.endsWith(".content.js")) {
+                type = "registry:file";
+            } else {
+                type = "registry:lib";
+            }
+        }
+        return {
+            path: item,
+            type: type,
+            target: target
+        }
+    });
+    return { "files": files };
 }
-
-function printPackageSection(
-    title: string,
-    items: string[],
-    indent: string
-) {
-    if (items.length === 0) {
-        console.log(`${indent}${title}: (none)`);
-        return;
-    }
-
-    console.log(`${indent}${title}:`);
-    items.forEach((item) => console.log(`${indent}  - ${item}`));
-}
-
 function collectPackageReferences(
     file: FileNode,
     key: "dependency" | "devDependency" | "registryDependency"
@@ -242,11 +265,12 @@ function collectPackageReferences(
     file.imports.forEach((entry) => {
         const ref = entry[key];
         if (ref) {
-            map.set(ref.name + (ref.version ?? ref.type ?? ""), formatPackageRef(ref, key));
+            const display = formatPackageRef(ref, key);
+            map.set(display, display);
         }
     });
 
-    return Array.from(map.values()).sort((a, b) => a.localeCompare(b));
+    return Array.from(map.values());
 }
 
 function formatPackageRef(
@@ -254,10 +278,24 @@ function formatPackageRef(
     key: "dependency" | "devDependency" | "registryDependency"
 ): string {
     if (key === "registryDependency") {
-        return `${ref.name} [${ref.type ?? "registry"}]`;
+        let result = "";
+        const name =
+            ref.name && ref.name.includes("/")
+                ? ref.name.slice(ref.name.lastIndexOf("/") + 1)
+                : ref.name;
+        //return `${name} [${ref.type ?? "registry"}]`;
+        let type = ref.type ?? "";
+        result = (type === "@shadcn/ui") ? `${name}` : `${type}/${name}`;
+        const slashCount = (result.match(/\//g) || []).length;
+        if (slashCount > 1) {
+            return result.replace('/', '-');
+        }
+        return result
+
     }
 
-    return ref.version ? `${ref.name}@${ref.version}` : ref.name;
+    //return ref.version ? `${ref.name}@${ref.version}` : ref.name;
+    return ref.name;
 }
 
 function collectFileDependencies(
@@ -278,5 +316,22 @@ function collectFileDependencies(
         });
     });
 
+    const contentDeps = options.contentDependencyMap?.get(file.path) ?? [];
+    contentDeps.forEach((contentPath) => {
+        if (!nodes.has(contentPath)) {
+            nodes.set(contentPath, createContentDependencyNode(contentPath));
+        }
+    });
+
     return Array.from(nodes.values()).sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function createContentDependencyNode(relativePath: string): FileNode {
+    return {
+        type: "file",
+        name: path.basename(relativePath),
+        path: relativePath,
+        imports: [],
+        meta: { size: 0, modifiedAt: "", importCount: 0 },
+    };
 }
