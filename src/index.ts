@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { Separator, select } from "@inquirer/prompts";
 import { loadConfig, resolveTargetPath } from "./config";
+import { createRegistryInfo } from "./createRegistryInfo";
 import { findNearestPackageJson } from "./package-info";
 import {
     annotateImportCounts,
@@ -16,8 +17,59 @@ import {
 import { loadTsconfigInfo } from "./tsconfig-info";
 import type { FileNode, PackageReference } from "./types";
 
+type CliArgs = {
+    targetPath: string;
+    verbose: boolean;
+};
+
+type LogFn = (...args: Parameters<typeof console.log>) => void;
+
+let cliLog: LogFn = () => { };
+
+function setVerboseLogging(enabled: boolean) {
+    cliLog = enabled ? (...args) => console.log(...args) : () => { };
+}
+
+function parseCliArgs(argv: string[]): CliArgs {
+    const args = argv.slice(2);
+    if (
+        args[0] &&
+        [".ts", ".tsx", ".js", ".mjs", ".cjs"].includes(path.extname(args[0])) &&
+        (args[0].includes(path.sep) || args[0].startsWith("."))
+    ) {
+        args.shift();
+    }
+    let verbose = false;
+    let targetPath: string | undefined;
+
+    for (const arg of args) {
+        if (arg === "-v" || arg === "--verbose") {
+            verbose = true;
+            setVerboseLogging(true);
+            continue;
+        }
+
+        if (!targetPath) {
+            targetPath = arg;
+            continue;
+        }
+
+        throw new Error(`Unexpected argument: ${arg}`);
+    }
+
+    if (!targetPath) {
+        throw new Error(
+            "Path argument is required. Usage: npm start -- [-v] <directory-to-scan>"
+        );
+    }
+
+    return { targetPath, verbose };
+}
+
 async function main() {
-    const target = await resolveTargetPath(process.argv[2]);
+    setVerboseLogging(false);
+    const { targetPath, verbose } = parseCliArgs(process.argv);
+    const target = await resolveTargetPath(targetPath);
     const config = await loadConfig(target, process.cwd());
     const packageInfo = await findNearestPackageJson(target);
     logPackageInfo(packageInfo);
@@ -37,8 +89,8 @@ async function main() {
     const fileIndex = buildFileIndex(result);
     const componentCandidates = getComponentCandidates(result);
 
-    console.log("\nFiles Index:");
-    console.log(JSON.stringify(result, null, 2));
+    cliLog("\nFiles Index:");
+    cliLog(JSON.stringify(result, null, 2));
     await runComponentExplorer(
         componentCandidates,
         fileIndex,
@@ -47,7 +99,7 @@ async function main() {
     );
 }
 
-function formatFileDependencyPath(absolutePath: string, rootPath: string): string {
+export function formatFileDependencyPath(absolutePath: string, rootPath: string): string {
     const normalized = absolutePath.replace(/\\/g, "/");
     const marker = "/src/";
     const markerIndex = normalized.indexOf(marker);
@@ -61,16 +113,16 @@ function formatFileDependencyPath(absolutePath: string, rootPath: string): strin
 
 function logPackageInfo(packageInfo: Awaited<ReturnType<typeof findNearestPackageJson>>) {
     if (!packageInfo) {
-        console.log("No package.json found above target directory.");
+        cliLog("No package.json found above target directory.");
         return;
     }
 
-    console.log(`Using package.json at ${packageInfo.path}`);
+    cliLog(`Using package.json at ${packageInfo.path}`);
     const deps = Object.keys(packageInfo.dependencies).sort();
     const devDeps = Object.keys(packageInfo.devDependencies).sort();
 
-    console.log("\nDependencies:", deps.length ? deps.join(", ") : "(none)");
-    console.log("\nDevDependencies:", devDeps.length ? devDeps.join(", ") : "(none)");
+    cliLog("\nDependencies:", deps.length ? deps.join(", ") : "(none)");
+    cliLog("\nDevDependencies:", devDeps.length ? devDeps.join(", ") : "(none)");
 }
 
 function logTsconfigInfo(
@@ -78,25 +130,25 @@ function logTsconfigInfo(
     packageRoot: string
 ) {
     if (tsconfigInfo.files.length === 0) {
-        console.log("\nNo tsconfig files found above target directory.");
+        cliLog("\nNo tsconfig files found above target directory.");
         return;
     }
 
-    console.log("\nUsing tsconfig files:");
+    cliLog("\nUsing tsconfig files:");
     tsconfigInfo.files.forEach((file) =>
-        console.log(` - ${path.relative(packageRoot, file)}`)
+        cliLog(` - ${path.relative(packageRoot, file)}`)
     );
 
     if (tsconfigInfo.pathMappings.length) {
-        console.log("\nResolved path aliases:");
+        cliLog("\nResolved path aliases:");
         tsconfigInfo.pathMappings.forEach((mapping) => {
             const targets = mapping.targets
                 .map((target) => path.relative(packageRoot, target))
                 .join(", ");
-            console.log(` - ${mapping.alias} -> ${targets}`);
+            cliLog(` - ${mapping.alias} -> ${targets}`);
         });
     } else {
-        console.log("\nNo path aliases defined in located tsconfig files.");
+        cliLog("\nNo path aliases defined in located tsconfig files.");
     }
 }
 
@@ -113,9 +165,9 @@ async function runComponentExplorer(
     rootPath: string,
     options: ScanOptions
 ) {
-    console.log("\nComponent Candidates");
+    cliLog("\nComponent Candidates");
     if (candidates.length === 0) {
-        console.log("  (none)");
+        cliLog("  (none)");
         return;
     }
 
@@ -130,7 +182,9 @@ async function runComponentExplorer(
                     value: candidate,
                 })),
                 new Separator(),
+                { name: "Create registry.info file", value: "createRegistryInfo" },
                 { name: "Exit", value: null },
+                new Separator(),
             ],
             pageSize: Math.min(sortedCandidates.length + 1, 20),
         }).catch((error) => {
@@ -141,11 +195,17 @@ async function runComponentExplorer(
         });
 
         if (!answer) {
-            console.log("Exiting component candidates explorer.");
+            cliLog("Exiting component candidates explorer.");
             break;
         }
 
-        printComponentReport(answer, fileIndex, rootPath, options);
+        switch (answer) {
+            case "createRegistryInfo":
+                createRegistryInfo(rootPath, sortedCandidates);
+                break;
+            default:
+                printComponentReport(answer, fileIndex, rootPath, options);
+        }
     }
 }
 
@@ -162,10 +222,15 @@ function printComponentReport(
     }
 
     console.log(`\nComponent Candidates Report: ${node.path}`);
+    let componentFile = new Set<string>();
+    componentFile.add(formatFileDependencyPath(path.join(rootPath, candidatePath), rootPath));
     const summary = buildComponentSummary(node, fileIndex, rootPath, options);
+
+    // Add component file to file dependencies 
+    let allFileDependencies = new Set([...componentFile, ...summary.fileDependencies]);
     const dependencies = printSummaryGroup("dependencies", summary.dependencies);
     const registryDependencies = printSummaryGroup("registryDependencies", summary.registryDependencies);
-    const fileDependencies = printSummaryGroupFiles(summary.fileDependencies);
+    const fileDependencies = printSummaryGroupFiles(allFileDependencies);
     const allResults = { ...dependencies, ...registryDependencies, ...fileDependencies };
     console.log(JSON.stringify(allResults, null, 2));
 }
