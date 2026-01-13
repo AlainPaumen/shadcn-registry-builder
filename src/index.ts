@@ -1,21 +1,24 @@
 import path from "node:path";
 
 import { Separator, select } from "@inquirer/prompts";
+import {
+    summarizeComponent,
+    type RegistryFileEntry
+} from "./component-summary";
 import { loadConfig, resolveTargetPath } from "./config";
 import { createRegistryInfo } from "./createRegistryInfo";
 import { findNearestPackageJson } from "./package-info";
+import { generateRegistryJson } from "./registry-json";
 import {
     annotateImportCounts,
     attachContentDependencies,
     buildFileIndex,
-    findFileNodeByRelativePath,
     getComponentCandidates,
-    resolveImportTargets,
     scanDirectory,
-    type ScanOptions,
+    type ScanOptions
 } from "./scanner";
 import { loadTsconfigInfo } from "./tsconfig-info";
-import type { FileNode, PackageReference } from "./types";
+import type { FileNode } from "./types";
 
 type CliArgs = {
     targetPath: string;
@@ -99,18 +102,6 @@ async function main() {
     );
 }
 
-export function formatFileDependencyPath(absolutePath: string, rootPath: string): string {
-    const normalized = absolutePath.replace(/\\/g, "/");
-    const marker = "/src/";
-    const markerIndex = normalized.indexOf(marker);
-    if (markerIndex !== -1) {
-        return `.${normalized.slice(markerIndex)}`;
-    }
-
-    const relative = path.relative(rootPath, absolutePath).replace(/\\/g, "/");
-    return relative || ".";
-}
-
 function logPackageInfo(packageInfo: Awaited<ReturnType<typeof findNearestPackageJson>>) {
     if (!packageInfo) {
         cliLog("No package.json found above target directory.");
@@ -177,13 +168,14 @@ async function runComponentExplorer(
         const answer = await select<string | null>({
             message: "Select a component to inspect (choose Exit to finish):",
             choices: [
+                { name: "1. Generate registry.info file", value: "createRegistryInfo" },
+                { name: "2. Generate registry.json file", value: "generateRegistryJson" },
+                { name: "Exit", value: null },
+                new Separator(),
                 ...sortedCandidates.map((candidate) => ({
                     name: candidate,
                     value: candidate,
                 })),
-                new Separator(),
-                { name: "Create registry.info file", value: "createRegistryInfo" },
-                { name: "Exit", value: null },
                 new Separator(),
             ],
             pageSize: Math.min(sortedCandidates.length + 1, 20),
@@ -201,7 +193,10 @@ async function runComponentExplorer(
 
         switch (answer) {
             case "createRegistryInfo":
-                createRegistryInfo(rootPath, sortedCandidates);
+                await createRegistryInfo(rootPath, sortedCandidates);
+                break;
+            case "generateRegistryJson":
+                await generateRegistryJson(rootPath, sortedCandidates, fileIndex, options);
                 break;
             default:
                 printComponentReport(answer, fileIndex, rootPath, options);
@@ -215,188 +210,34 @@ function printComponentReport(
     rootPath: string,
     options: ScanOptions
 ) {
-    const node = findFileNodeByRelativePath(fileIndex, candidatePath);
-    if (!node) {
+    const summary = summarizeComponent(candidatePath, fileIndex, rootPath, options);
+    if (!summary) {
         console.log(`\nUnable to locate component: ${candidatePath}`);
         return;
     }
 
-    console.log(`\nComponent Candidates Report: ${node.path}`);
-    let componentFile = new Set<string>();
-    componentFile.add(formatFileDependencyPath(path.join(rootPath, candidatePath), rootPath));
-    const summary = buildComponentSummary(node, fileIndex, rootPath, options);
-
-    // Add component file to file dependencies 
-    let allFileDependencies = new Set([...componentFile, ...summary.fileDependencies]);
+    console.log(`\nComponent Candidates Report: ${summary.node.path}`);
     const dependencies = printSummaryGroup("dependencies", summary.dependencies);
-    const registryDependencies = printSummaryGroup("registryDependencies", summary.registryDependencies);
-    const fileDependencies = printSummaryGroupFiles(allFileDependencies);
+    const registryDependencies = printSummaryGroup(
+        "registryDependencies",
+        summary.registryDependencies
+    );
+    const fileDependencies = printSummaryGroupFiles(summary.files);
     const allResults = { ...dependencies, ...registryDependencies, ...fileDependencies };
     console.log(JSON.stringify(allResults, null, 2));
 }
 
-type ComponentSummary = {
-    dependencies: Set<string>;
-    registryDependencies: Set<string>;
-    fileDependencies: Set<string>;
-};
-
-function buildComponentSummary(
-    node: FileNode,
-    fileIndex: Map<string, FileNode>,
-    rootPath: string,
-    options: ScanOptions,
-    summary: ComponentSummary = {
-        dependencies: new Set(),
-        registryDependencies: new Set(),
-        fileDependencies: new Set(),
-    },
-    visited: Set<string> = new Set()
-): ComponentSummary {
-    if (visited.has(node.path)) {
-        return summary;
-    }
-
-    visited.add(node.path);
-
-    collectPackageReferences(node, "dependency").forEach((value) =>
-        summary.dependencies.add(value)
-    );
-    collectPackageReferences(node, "devDependency").forEach((value) =>
-        summary.dependencies.add(value)
-    );
-    collectPackageReferences(node, "registryDependency").forEach((value) =>
-        summary.registryDependencies.add(value)
-    );
-
-    const fileDependencies = collectFileDependencies(node, fileIndex, rootPath, options);
-    fileDependencies.forEach((child) => {
-        const absolutePath = path.resolve(rootPath, child.path);
-        const displayPath = formatFileDependencyPath(absolutePath, rootPath);
-        summary.fileDependencies.add(displayPath);
-        buildComponentSummary(child, fileIndex, rootPath, options, summary, visited);
-    });
-
-    return summary;
-}
-
-function printSummaryGroup(title: string, values: Set<string>) {
-    const items = Array.from(values).sort((a, b) => a.localeCompare(b));
-
-    if (!items.length) {
+function printSummaryGroup(title: string, values: string[]) {
+    if (!values.length) {
         return {};
     }
+    const items = values.slice().sort((a, b) => a.localeCompare(b));
     return { [title]: items };
 }
 
-function printSummaryGroupFiles(values: Set<string>) {
-    const items = Array.from(values).sort((a, b) => a.localeCompare(b));
-
-    if (!items.length) {
+function printSummaryGroupFiles(files: RegistryFileEntry[]) {
+    if (!files.length) {
         return {};
     }
-    let files = items.map((item) => {
-        const target = item.startsWith(".") ? item.replace(".", "~") : item;
-        const extension = path.extname(target);
-        let type = "registry:file";
-        if (extension === ".tsx" || extension === ".jsx") {
-            if (item.endsWith(".content.ts") || item.endsWith(".content.js")) {
-                type = "registry:file";
-            } else {
-                type = "registry:component";
-            }
-        }
-        if (extension === ".ts" || extension === ".js") {
-            if (item.endsWith(".content.ts") || item.endsWith(".content.js")) {
-                type = "registry:file";
-            } else {
-                type = "registry:lib";
-            }
-        }
-        return {
-            path: item,
-            type: type,
-            target: target
-        }
-    });
-    return { "files": files };
-}
-function collectPackageReferences(
-    file: FileNode,
-    key: "dependency" | "devDependency" | "registryDependency"
-): string[] {
-    const map = new Map<string, string>();
-
-    file.imports.forEach((entry) => {
-        const ref = entry[key];
-        if (ref) {
-            const display = formatPackageRef(ref, key);
-            map.set(display, display);
-        }
-    });
-
-    return Array.from(map.values());
-}
-
-function formatPackageRef(
-    ref: PackageReference,
-    key: "dependency" | "devDependency" | "registryDependency"
-): string {
-    if (key === "registryDependency") {
-        let result = "";
-        const name =
-            ref.name && ref.name.includes("/")
-                ? ref.name.slice(ref.name.lastIndexOf("/") + 1)
-                : ref.name;
-        //return `${name} [${ref.type ?? "registry"}]`;
-        let type = ref.type ?? "";
-        result = (type === "@shadcn/ui") ? `${name}` : `${type}/${name}`;
-        const slashCount = (result.match(/\//g) || []).length;
-        if (slashCount > 1) {
-            return result.replace('/', '-');
-        }
-        return result
-
-    }
-
-    //return ref.version ? `${ref.name}@${ref.version}` : ref.name;
-    return ref.name;
-}
-
-function collectFileDependencies(
-    file: FileNode,
-    fileIndex: Map<string, FileNode>,
-    rootPath: string,
-    options: ScanOptions
-): FileNode[] {
-    const nodes = new Map<string, FileNode>();
-
-    file.imports.forEach((entry) => {
-        const targets = resolveImportTargets(file, entry, rootPath, options);
-        targets.forEach((target) => {
-            const targetNode = findFileNodeByRelativePath(fileIndex, target);
-            if (targetNode) {
-                nodes.set(targetNode.path, targetNode);
-            }
-        });
-    });
-
-    const contentDeps = options.contentDependencyMap?.get(file.path) ?? [];
-    contentDeps.forEach((contentPath) => {
-        if (!nodes.has(contentPath)) {
-            nodes.set(contentPath, createContentDependencyNode(contentPath));
-        }
-    });
-
-    return Array.from(nodes.values()).sort((a, b) => a.path.localeCompare(b.path));
-}
-
-function createContentDependencyNode(relativePath: string): FileNode {
-    return {
-        type: "file",
-        name: path.basename(relativePath),
-        path: relativePath,
-        imports: [],
-        meta: { size: 0, modifiedAt: "", importCount: 0 },
-    };
+    return { files };
 }
