@@ -166,7 +166,7 @@ async function runComponentExplorer(
 
     while (true) {
         const answer = await select<string | null>({
-            message: "Select a component to inspect (choose Exit to finish):",
+            message: "Select a command or a component to inspect (choose Exit to finish):",
             choices: [
                 { name: "1. Generate registry.info file", value: "createRegistryInfo" },
                 { name: "2. Generate registry.json file", value: "generateRegistryJson" },

@@ -58,6 +58,9 @@ export async function createRegistryInfo(targetPath: string, items: string[]): P
 
     const mergedInfo = mergeRegistryInfo(baseInfo, previousInfo);
     await writeFile(registryPath, JSON.stringify(mergedInfo, null, 2));
+    if (await fileExists(backupPath)) {
+        await unlink(backupPath);
+    }
     console.log(`registry.info written to ${registryPath}`);
 }
 
